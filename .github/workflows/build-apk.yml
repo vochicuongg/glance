@@ -1,6 +1,6 @@
 name: Build release APK
 on:
-  workflow_dispatch:
+  workflow_dispatch: 
   push:
     branches: [feature/privacy-display-v2]
     paths: [".github/workflows/build-apk.yml"]
