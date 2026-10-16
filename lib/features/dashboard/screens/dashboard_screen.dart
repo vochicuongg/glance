@@ -16,6 +16,7 @@ import '../widgets/calibrate_card.dart';
 import '../widgets/tolerance_slider_card.dart';
 import '../widgets/overlay_mode_card.dart';
 import '../../permissions/screens/permission_screen.dart';
+import '../../privacy_display/privacy_display_screen.dart';
 import 'settings_screen.dart';
 import 'targeted_area_editor.dart';
 
@@ -30,11 +31,16 @@ import 'targeted_area_editor.dart';
 ///
 /// Layout (top to bottom):
 ///   1. AppBar with brand identity
-///   2. ShieldStatusCard — hero protection toggle
-///   3. SensitivitySliderCard — tilt tolerance adjustment
-///   4. CalibrateCard — baseline angle calibration
-///   5. OverlayModeCard — fullscreen / targeted toggle
-///   6. Footer info text
+///   2. ShieldStatusCard — hero protection toggle (tap to switch mode)
+///   3. Real-time sensor bars (Beta / Gamma)
+///   4. SensitivitySliderCard + ToleranceSliderCard
+///   5. AutoPostureToggle — "Tối ưu góc nhìn" (posture adaptation)
+///   6. OverlayModeCard — fullscreen / targeted toggle
+///   7. Privacy Display features hub card
+///   8. CalibrateCard — pinned bottom bar
+///
+/// Settings (gear icon) holds only app-level preferences:
+/// theme, language, about.
 /// ─────────────────────────────────────────────────────────────────────────────
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -786,6 +792,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                   ),
 
                   const SizedBox(height: 16),
+
+                  // 6. Privacy Display features hub — per-app triggers,
+                  // notification zone, credential guard, pixel pattern.
+                  // Features live here on the main screen; Settings keeps
+                  // only app-level preferences (theme / language / about).
+                  _buildPrivacyDisplayCard(context),
+
+                  const SizedBox(height: 16),
                 ]),
               ),
             ),
@@ -816,6 +830,67 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Entry card to the Privacy Display feature set (Glance 2.0).
+  /// Moved here from Settings: it is a feature hub, not a preference.
+  Widget _buildPrivacyDisplayCard(BuildContext context) {
+    final isVi = LocaleProvider.of(context).locale == AppLocale.vi;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: AppColors.cardSurface(context),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border(context), width: 0.5),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        leading: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: AppColors.gold.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(
+            Icons.privacy_tip_rounded,
+            size: 18,
+            color: AppColors.gold,
+          ),
+        ),
+        title: Text(
+          'Privacy Display',
+          style: TextStyle(
+            color: AppColors.textPrimaryC(context),
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          ),
+        ),
+        subtitle: Text(
+          isVi
+              ? 'Theo ứng dụng · Vùng thông báo · PIN/mật khẩu · Họa tiết'
+              : 'Per-app · Notification zone · PIN/password · Pattern',
+          style: TextStyle(
+            color: AppColors.textSecondaryC(context),
+            fontSize: 12,
+          ),
+        ),
+        trailing: Icon(
+          Icons.chevron_right_rounded,
+          color: AppColors.textSecondaryC(context),
+          size: 20,
+        ),
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => const PrivacyDisplayScreen(),
+            ),
+          );
+        },
       ),
     );
   }
