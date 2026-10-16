@@ -59,6 +59,44 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         return a
     }
 
+    // ── Samsung-Inspired Smoothstep (Hermite S-Curve) ─────────────────────
+    // Creates a smooth sigmoid-like transition between edge0 and edge1.
+    // Output: 0.0 at edge0, 1.0 at edge1, smooth acceleration/deceleration.
+    // Formula: 3t² - 2t³ (cubic Hermite interpolation)
+    // Superior to linear ramp: overlay appears gently then accelerates,
+    // mimicking Samsung Privacy Display's natural opacity curve.
+    private fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
+        val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    // ── Adaptive LPF Alpha computation ────────────────────────────────────
+    // Computes optimal LPF alpha based on sensor change magnitude.
+    // Large delta (deliberate tilt) → light filtering (responsive)
+    // Small delta (tremor/vibration) → heavy filtering (smooth)
+    private fun computeAdaptiveLpfAlpha(dx: Float, dy: Float, dz: Float): Float {
+        val delta = Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+        // Blend between HEAVY and LIGHT based on delta magnitude
+        val blend = (delta / LPF_ADAPT_THRESHOLD).coerceIn(0f, 1f)
+        return LPF_ALPHA_HEAVY + blend * (LPF_ALPHA_LIGHT - LPF_ALPHA_HEAVY)
+    }
+
+    // ── Sensitivity → Deviation Ramp Width mapping ────────────────────────
+    // sensorSensitivity (0.0 = least sensitive → 1.0 = most sensitive)
+    // Maps to deviation ramp width: wider ramp = more gradual opacity change
+    // Low sensitivity (0.0) → 15° ramp (very gradual, tolerant)
+    // High sensitivity (1.0) → 4° ramp (snappy, quick darkening)
+    private fun computeDeviationRampWidth(): Float {
+        return 15f - (sensorSensitivity * 11f)  // Range: 4° to 15°
+    }
+
+    // ── Sensitivity → Hysteresis Band Width mapping ───────────────────────
+    // Wider band = more stable (less flicker), narrower = more responsive
+    // Low sensitivity → 4° band, High sensitivity → 1.5° band
+    private fun computeHysteresisBand(): Float {
+        return 4.0f - (sensorSensitivity * 2.5f)  // Range: 1.5° to 4°
+    }
+
     companion object {
         private const val TAG = "MaxOverlayService"
 
@@ -181,7 +219,24 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
     private var filteredGx: Float = 0f
     private var filteredGy: Float = 0f
     private var filteredGz: Float = 0f
-    private val SENSOR_LPF_ALPHA: Float = 0.15f
+    // ── Samsung-Inspired Adaptive LPF ──────────────────────────────────────
+    // Instead of a fixed alpha, dynamically adjust between LIGHT (responsive
+    // to intentional tilts) and HEAVY (suppresses hand tremor/vibration).
+    // The blending factor is based on the magnitude of raw sensor change.
+    private val LPF_ALPHA_LIGHT: Float = 0.30f   // Quick response for deliberate tilt
+    private val LPF_ALPHA_HEAVY: Float = 0.06f    // Heavy smoothing for tremor/vibration
+    private val LPF_ADAPT_THRESHOLD: Float = 0.04f // Sensor delta magnitude to blend between light/heavy
+    private var prevRawGx: Float = 0f
+    private var prevRawGy: Float = 0f
+    private var prevRawGz: Float = 0f
+
+    // ── Samsung-Inspired Hysteresis Dead Zone ──────────────────────────────
+    // Prevents flicker at the boundary by using two separate thresholds:
+    //   • outerThreshold (enter protection): tolerance + hysteresisBand/2
+    //   • innerThreshold (leave protection): tolerance - hysteresisBand/2
+    // The shield only activates when deviation crosses OUTER, and only
+    // deactivates when it drops below INNER. Band width scales with sensitivity.
+    private var isShieldEngaged: Boolean = false   // Hysteresis state flag
 
     // ── VSYNC-driven interpolation target ─────────────────────────────────
     private var targetAlpha: Float = 0f
@@ -190,6 +245,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
 
     // ── EMA-smoothed alpha (directly controls overlay opacity) ────────────
     private var currentDisplayedAlpha: Float = 0f
+
+    // ── Overlay Auto-Remove: auto-destroy View when transparent for 2s ────
+    private var alphaZeroSince: Long = 0L
+    private val OVERLAY_AUTO_REMOVE_DELAY: Long = 2000L
 
     // ── Fade-to-Clear animation lock ──────────────────────────────────────
     // When true, the ValueAnimator is driving alpha → 0. Main sensor and
@@ -235,7 +294,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
     private val AC_PITCH_MAX: Float = 170f
     private val AC_MIN_OPACITY_RATIO: Float = 0.10f
     private val AC_FAST_OPACITY_RATIO: Float = 0.40f
-    private val AC_FAST_STABILITY_DURATION: Long = 1000L
+    private val AC_FAST_STABILITY_DURATION: Long = 500L
     private val AC_SNAPSHOT_ANGLE_TOLERANCE: Float = 5.0f
     private val AC_ANIMATION_DURATION: Long = 600L         // Smooth transition duration (legacy, kept for reference)
     private val AC_BREATHE_FADEOUT_DURATION: Long = 300L    // Breathing: Fade-out (screen brightens)
@@ -296,18 +355,32 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             }
 
             val diff = targetAlpha - currentDisplayedAlpha
-            if (Math.abs(diff) > 0.05f) {
-                // ── BƯỚC 1: ASYMMETRIC LERP — Instant Dark, Smooth Fade ──
-                // Security Priority: Overlay MUST appear INSTANTLY when protecting.
-                // UX Priority: Overlay should fade smoothly to avoid eye strain.
+            if (Math.abs(diff) > 0.5f) {
+                // ── Samsung-Inspired ASYMMETRIC EMA ────────────────────────
+                // DARKENING: Fast but slightly smoothed (0.7) to avoid jarring flash
+                // FADING: Slow ease-out (0.10) with decay curve near zero
+                //   → overlay melts away naturally instead of snapping off
                 val emaCoefficient = if (targetAlpha > currentDisplayedAlpha) {
-                    // DARKENING (Protection mode) → INSTANT appearance
-                    1.0f  // Direct assignment for immediate protection
+                    // DARKENING (Protection mode) → Fast but still smooth
+                    0.70f
                 } else {
-                    // FADING (Returning to normal) → SMOOTH transition
-                    0.25f  // Gentle fade to prevent eye flash
+                    // FADING (Returning to normal) → Slow ease-out with decay
+                    // As alpha approaches 0, the coefficient decreases further,
+                    // creating a natural deceleration ("landing") effect
+                    val fadeBase = 0.10f
+                    val decayFactor = (currentDisplayedAlpha / MAX_ALPHA).coerceIn(0.3f, 1.0f)
+                    fadeBase * decayFactor
                 }
                 currentDisplayedAlpha += emaCoefficient * diff
+
+                // ── Overlay Auto-Remove tracking ──────────────────────────
+                if (currentDisplayedAlpha < 0.5f) {
+                    currentDisplayedAlpha = 0f
+                    if (alphaZeroSince == 0L) alphaZeroSince = System.currentTimeMillis()
+                } else {
+                    alphaZeroSince = 0L
+                }
+
                 applyAlphaToOverlay(currentDisplayedAlpha.toInt())
                 isAnimationRunning = true
                 overlayViews[0].postOnAnimation(this)
@@ -317,7 +390,30 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     currentDisplayedAlpha = targetAlpha
                     applyAlphaToOverlay(currentDisplayedAlpha.toInt())
                 }
+
+                // ── Overlay Auto-Remove: destroy View when transparent for 2s ──
+                if (currentDisplayedAlpha < 0.5f) {
+                    if (alphaZeroSince == 0L) alphaZeroSince = System.currentTimeMillis()
+                    val transparentDuration = System.currentTimeMillis() - alphaZeroSince
+                    if (transparentDuration >= OVERLAY_AUTO_REMOVE_DELAY && !autoCalibrationEnabled) {
+                        // View has been fully transparent for 2s → destroy to save resources
+                        isOverlayShowing = false
+                        removeOverlayView()
+                        isShieldEngaged = false
+                        alphaZeroSince = 0L
+                        Log.d(TAG, "Overlay auto-removed after ${transparentDuration}ms transparency")
+                        isAnimationRunning = false
+                        return
+                    }
+                } else {
+                    alphaZeroSince = 0L
+                }
+
                 if (autoCalibrationEnabled && firstDeviationTime > 0L && acTargetDuration > 0L) {
+                    isAnimationRunning = true
+                    overlayViews[0].postOnAnimation(this)
+                } else if (currentDisplayedAlpha < 0.5f && alphaZeroSince > 0L) {
+                    // Keep VSYNC alive for auto-remove countdown
                     isAnimationRunning = true
                     overlayViews[0].postOnAnimation(this)
                 } else {
@@ -404,6 +500,8 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                         filteredGx = 0f
                         filteredGy = 0f
                         filteredGz = 0f
+                        isShieldEngaged = false
+                        alphaZeroSince = 0L
                         acBaselineInitialized = false
                         firstDeviationTime = 0L
                         acTargetDuration = 0L
@@ -436,6 +534,8 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     filteredGx = 0f
                     filteredGy = 0f
                     filteredGz = 0f
+                    isShieldEngaged = false
+                    alphaZeroSince = 0L
                     // Reset AC baseline so gravity sensor also re-bootstraps
                     acBaselineInitialized = false
                     firstDeviationTime = 0L
@@ -574,6 +674,8 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     filteredGx = 0f
                     filteredGy = 0f
                     filteredGz = 0f
+                    isShieldEngaged = false
+                    alphaZeroSince = 0L
                     acBaselineInitialized = false
                     firstDeviationTime = 0L
                     acTargetDuration = 0L
@@ -651,17 +753,29 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         val rawGy = rotationMatrix[7]
         val rawGz = rotationMatrix[8]
 
-        // ── LPF: Lọc nhiễu góc chéo bằng Exponential Moving Average ──────
-        // Reset bộ lọc ngay lập tức khi cần lấy mốc (needsBaselineReset) để triệt tiêu bóng ma dữ liệu cũ
+        // ── Samsung-Inspired Adaptive LPF ─────────────────────────────────
+        // Reset bộ lọc ngay lập tức khi cần lấy mốc (needsBaselineReset)
+        // để triệt tiêu bóng ma dữ liệu cũ
         if ((filteredGx == 0f && filteredGy == 0f && filteredGz == 0f) || needsBaselineReset) {
             // Ép bộ lọc nhận ngay giá trị thực tế để baseline bắt mốc chuẩn xác 100%
             filteredGx = rawGx
             filteredGy = rawGy
             filteredGz = rawGz
+            prevRawGx = rawGx
+            prevRawGy = rawGy
+            prevRawGz = rawGz
         } else {
-            filteredGx += SENSOR_LPF_ALPHA * (rawGx - filteredGx)
-            filteredGy += SENSOR_LPF_ALPHA * (rawGy - filteredGy)
-            filteredGz += SENSOR_LPF_ALPHA * (rawGz - filteredGz)
+            // Compute adaptive alpha based on raw sensor change magnitude
+            val dx = rawGx - prevRawGx
+            val dy = rawGy - prevRawGy
+            val dz = rawGz - prevRawGz
+            val adaptiveAlpha = computeAdaptiveLpfAlpha(dx, dy, dz)
+            filteredGx += adaptiveAlpha * (rawGx - filteredGx)
+            filteredGy += adaptiveAlpha * (rawGy - filteredGy)
+            filteredGz += adaptiveAlpha * (rawGz - filteredGz)
+            prevRawGx = rawGx
+            prevRawGy = rawGy
+            prevRawGz = rawGz
         }
 
         // Trục Gamma (Roll): Dùng asin(filteredGx) để lấy góc nghiêng ngang tuyệt đối, không bị nhiễu bởi độ chúi của máy (Pitch)
@@ -692,6 +806,8 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             baselineRoll = rawRollDeg
             baselinePitch = rawPitchDeg
             currentDisplayedAlpha = 0f
+            isShieldEngaged = false
+            alphaZeroSince = 0L
             needsBaselineReset = false
 
             // FIX: Lưu baseline mới vào SharedPreferences ngay lập tức,
@@ -709,18 +825,34 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         val absRoll = Math.abs(normalizeAngle(rawRollDeg - baselineRoll))
         val absPitch = Math.abs(normalizeAngle(rawPitchDeg - baselinePitch))
 
-        // ── 4. Compute Target Alpha from tilt deviation ───────────────────
-        // Tổng hợp vector chéo bằng định lý Pytago để tạo vùng an toàn hình tròn, triệt tiêu lỗi nhấp nháy
+        // ── 4. Samsung-Inspired Privacy Display Algorithm ─────────────────
+        // Tổng hợp vector chéo bằng định lý Pytago để tạo vùng an toàn hình tròn
         val maxDeviation = Math.hypot(absRoll.toDouble(), absPitch.toDouble()).toFloat()
 
-        // sensorTolerance is already in degrees (2°–40°) from Flutter slider
-        val toleranceThreshold = sensorTolerance
+        // ── 4a. Hysteresis Dead Zone (Anti-Flicker) ───────────────────────
+        // Uses two separate thresholds to prevent flicker at boundary:
+        //   • OUTER threshold (activate shield): tolerance + band/2
+        //   • INNER threshold (deactivate shield): tolerance - band/2
+        val hysteresisBand = computeHysteresisBand()
+        val outerThreshold = sensorTolerance + hysteresisBand / 2f
+        val innerThreshold = (sensorTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
 
-        // Áp dụng chung toleranceThreshold cho maxDeviation
-        this.targetAlpha = if (maxDeviation > toleranceThreshold) {
-            val deviation = maxDeviation - toleranceThreshold
-            val ratio = (deviation / 8f).coerceIn(0f, 1f)
-            ratio * MAX_ALPHA
+        // Update hysteresis state
+        if (!isShieldEngaged && maxDeviation > outerThreshold) {
+            isShieldEngaged = true
+        } else if (isShieldEngaged && maxDeviation < innerThreshold) {
+            isShieldEngaged = false
+        }
+
+        // ── 4b. S-Curve Alpha Ramp (Samsung Smoothstep) ───────────────────
+        // When shield is engaged, compute target alpha using a smooth S-curve
+        // instead of linear ramp. The ramp width adapts to sensitivity setting.
+        this.targetAlpha = if (isShieldEngaged) {
+            val rampWidth = computeDeviationRampWidth()
+            val rampStart = innerThreshold
+            val rampEnd = innerThreshold + rampWidth
+            // Smoothstep: S-curve from 0 to MAX_ALPHA over the ramp range
+            smoothstep(rampStart, rampEnd, maxDeviation) * MAX_ALPHA
         } else {
             0f
         }
@@ -728,8 +860,9 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         // Persistent View: Chỉ tạo View duy nhất 1 lần khi vượt ngưỡng
         if (!isOverlayShowing && this.targetAlpha > 0f) {
             isOverlayShowing = true
+            alphaZeroSince = 0L
             createOverlayView()
-        } else if (isOverlayShowing && Math.abs(this.targetAlpha - currentDisplayedAlpha) > 0.05f) {
+        } else if (isOverlayShowing && Math.abs(this.targetAlpha - currentDisplayedAlpha) > 0.5f) {
             // Watchdog: Nếu hệ thống Android ngầm drop VSYNC (để tiết kiệm pin) khiến animation bị kẹt
             val now = System.currentTimeMillis()
             if (!isAnimationRunning || (now - lastVsyncTime > 100L)) {
