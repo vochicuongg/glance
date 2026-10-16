@@ -282,8 +282,21 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
     private var acStabilityRunnable: Runnable? = null
     private var acStableTargetPitch: Float = 0f
     private var acStableTargetRoll: Float = 0f
-    private var acStableOpacityBucket: Int = -1
-    // *** New timestamp for auto-calibration stability ***
+
+    // -- Posture Adaptation v2 state ------------------------------------
+    // Previous smoothed sample + its timestamp (angular-speed estimate),
+    // and the settle window: when it opened (0 = closed) plus the
+    // candidate posture's orientation at opening (drift guard).
+    private var acPrevSmoothedPitch: Float = 0f
+    private var acPrevSmoothedRoll: Float = 0f
+    private var acLastSampleMs: Long = 0L
+    private var acSettleStartMs: Long = 0L
+    private var acCandidateStartPitch: Float = 0f
+    private var acCandidateStartRoll: Float = 0f
+    // Legacy opacity-bucket timer fields (pre-v2). Posture Adaptation v2
+    // decides re-baselining inside the AC sensor listener and never
+    // starts this timer; the fields remain because the calibrate /
+    // stop / resume handlers still reset them.
     // Marked @Volatile for thread-safe access from both sensor and VSYNC threads
     @Volatile
     private var firstDeviationTime: Long = 0L
@@ -291,16 +304,24 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
     @Volatile
     private var acTargetDuration: Long = 0L  // Computed by sensor thread, read by VSYNC
 
-    // Thresholds
-    private val AC_ANGLE_CHANGE_THRESHOLD: Float = 40.0f   // Must deviate > 40° to start timer (only large posture changes trigger auto-calibration)
-    private val AC_STABILITY_TOLERANCE: Float = 8.0f
-    private val AC_STABILITY_DURATION: Long = 3000L
-    private val AC_PITCH_MIN: Float = 10f
-    private val AC_PITCH_MAX: Float = 170f
-    private val AC_MIN_OPACITY_RATIO: Float = 0.10f
-    private val AC_FAST_OPACITY_RATIO: Float = 0.40f
-    private val AC_FAST_STABILITY_DURATION: Long = 500L
-    private val AC_SNAPSHOT_ANGLE_TOLERANCE: Float = 5.0f
+    // Thresholds - Posture Adaptation v2
+    // The old algorithm gated adaptation on the shield's own opacity
+    // (0.5s "fast" bucket under 40% alpha, a full 3s above it) and
+    // restarted its timer whenever the held angle drifted >5 degrees
+    // from a frozen snapshot - so a posture change first had to blacken
+    // the screen, natural sway while lying down could postpone rescue
+    // indefinitely, and the |pitch| 10-170 degree gate froze adaptation
+    // in exactly the lying postures that need it. v2 asks one question
+    // instead: has the device SETTLED (smoothed angular speed ~ 0) in a
+    // new orientation, held long enough that it is a posture rather
+    // than a gesture?
+    private val AC_SETTLE_DURATION_MS: Long = 1000L    // Held-still time that confirms a new posture
+    private val AC_SETTLE_SPEED_DEG_S: Float = 10f     // Smoothed angular speed under which the grip counts as settled
+    private val AC_CANDIDATE_DRIFT_DEG: Float = 7f     // Max wander inside one settle window before it restarts
+    private val AC_POSTURE_MARGIN_DEG: Float = 4f      // Posture threshold = sensorTolerance + margin...
+    private val AC_POSTURE_MIN_DEG: Float = 9f         // ...but never below this
+    private val AC_GRAVITY_MIN: Float = 6.5f           // m/s^2 - plausibility band for |gravity| (~9.8 when held)
+    private val AC_GRAVITY_MAX: Float = 13.5f
     private val AC_ANIMATION_DURATION: Long = 600L         // Smooth transition duration (legacy, kept for reference)
     private val AC_BREATHE_FADEOUT_DURATION: Long = 300L    // Breathing: Fade-out (screen brightens)
     private val AC_BREATHE_FADEIN_DURATION: Long = 500L     // Breathing: Fade-in  (shield returns)
@@ -338,26 +359,9 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             // Ghi nhận nhịp đập sinh tồn của VSYNC
             lastVsyncTime = System.currentTimeMillis()
 
-            // ── BƯỚC 2.2: FIX Timer Check — Move from sensor to VSYNC for accuracy ──
-            // PROBLEM: Sensor callback doesn't fire when device is still → timer misses deadline
-            // SOLUTION: VSYNC runs at 60fps continuously, always catches timer expiration
-            if (autoCalibrationEnabled && firstDeviationTime > 0L && acTargetDuration > 0L) {
-                val elapsed = System.currentTimeMillis() - firstDeviationTime
-                if (elapsed >= acTargetDuration) {
-                    // Timer expired - trigger baseline transition
-                    Log.d(TAG, "VSYNC detected AC timer expiration — elapsed=${elapsed}ms, target=${acTargetDuration}ms")
-                    performSmoothBaselineTransition(acStableTargetPitch, acStableTargetRoll)
-                    firstDeviationTime = 0L
-                    acTargetDuration = 0L
-                    // FIX: Return immediately after triggering transition.
-                    // performSmoothBaselineTransition sets isAnimating=true and starts
-                    // a ValueAnimator. If we continue to the lerp section below, both
-                    // the lerp and the ValueAnimator fight over currentDisplayedAlpha,
-                    // causing visual glitches and state corruption.
-                    isAnimationRunning = false
-                    return
-                }
-            }
+            // Posture Adaptation v2 decides re-baselining inside the AC
+            // sensor listener itself (settle detection on the gravity
+            // stream), so VSYNC no longer polls an AC timer here.
 
             val diff = targetAlpha - currentDisplayedAlpha
             if (Math.abs(diff) > 0.5f) {
@@ -414,10 +418,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     alphaZeroSince = 0L
                 }
 
-                if (autoCalibrationEnabled && firstDeviationTime > 0L && acTargetDuration > 0L) {
-                    isAnimationRunning = true
-                    overlayViews[0].postOnAnimation(this)
-                } else if (currentDisplayedAlpha < 0.5f && alphaZeroSince > 0L) {
+                if (currentDisplayedAlpha < 0.5f && alphaZeroSince > 0L) {
                     // Keep VSYNC alive for auto-remove countdown
                     isAnimationRunning = true
                     overlayViews[0].postOnAnimation(this)
@@ -952,7 +953,12 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         val shieldColor = android.graphics.Color.argb(safeAlpha, 0, 0, 0)
         overlayViews.forEach { view ->
             if (view is PatternOverlayView) {
-                // Pixel Pattern rendering: density follows shield intensity.
+                // Pixel Pattern COMBINES with the solid shield: the pattern
+                // layer paints the same per-layer base alpha as a solid
+                // layer, plus the stripe grille whose density follows the
+                // shield intensity. (Previously it painted the grille only,
+                // so Maximum + Pattern was weaker than Maximum alone.)
+                view.setBaseAlpha(safeAlpha)
                 view.setIntensity(safeAlpha.toFloat() / MAX_ALPHA)
             } else {
                 view.setBackgroundColor(shieldColor)
@@ -994,9 +1000,15 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             val pxW = if (isTargeted && areaWidth > 0) areaWidth else WindowManager.LayoutParams.MATCH_PARENT
             val pxH = if (isTargeted && areaHeight > 0) areaHeight else WindowManager.LayoutParams.MATCH_PARENT
 
-            // Dual Shield = 2 layers in solid mode. In pattern mode a
-            // single patterned layer is used (two grilles would moiré).
-            val layerCount = if (usePatternOverlay) 1 else 2
+            // Dual Shield = ALWAYS 2 layers. With Pixel Pattern on, the
+            // TOP layer is a PatternOverlayView painting the same
+            // per-layer base fill plus the stripe grille, so pattern and
+            // solid shield compound (effective ≈ ALPHA_MAX_EFFECTIVE).
+            // There is only ever ONE grille, so no moiré between grilles.
+            // (Previously pattern mode dropped to a single grille-only
+            // layer with transparent gaps — Maximum + Pattern ended up
+            // weaker than Maximum alone.)
+            val layerCount = 2
             for (i in 0 until layerCount) {
                 val params = WindowManager.LayoutParams(
                     pxW,
@@ -1026,7 +1038,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
 
                 }
 
-                val view: View = if (usePatternOverlay) {
+                val view: View = if (usePatternOverlay && i == layerCount - 1) {
                     PatternOverlayView(this)
                 } else {
                     View(this)
@@ -1045,7 +1057,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             if (!isAnimationRunning && overlayViews.isNotEmpty()) {
                 overlayViews[0].postOnAnimation(vsyncRunnable)
             }
-            Log.d(TAG, "Max Shield created — 2 layers, TYPE_ACCESSIBILITY_OVERLAY")
+            Log.d(TAG, "Max Shield created — $layerCount layers (pattern=$usePatternOverlay), TYPE_ACCESSIBILITY_OVERLAY")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create Max Shield overlay: ${e.message}")
             removeOverlayView()
@@ -1119,7 +1131,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         gravitySensor?.let {
             sensorManager?.registerListener(
                 autoCalibrationSensorListener, it,
-                SensorManager.SENSOR_DELAY_NORMAL
+                // GAME rate (~20ms): Posture Adaptation v2 measures
+                // angular speed, which needs a denser stream than
+                // SENSOR_DELAY_NORMAL (~200ms) can provide.
+                SensorManager.SENSOR_DELAY_GAME
             )
         }
         Log.d(TAG, "AutoCalibration sensor STARTED")
@@ -1136,7 +1151,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         acStabilityRunnable = null
         firstDeviationTime = 0L
         acTargetDuration = 0L
-        acStableOpacityBucket = -1
+        acSettleStartMs = 0L
     }
 
     private fun destroyAutoCalibration() {
@@ -1174,6 +1189,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     acCurrentBaselinePitch = rawPitch
                     acCurrentBaselineRoll = rawRoll
                     acBaselineInitialized = true
+                    acPrevSmoothedPitch = rawPitch
+                    acPrevSmoothedRoll = rawRoll
+                    acLastSampleMs = System.currentTimeMillis()
+                    acSettleStartMs = 0L
                     Log.d(TAG, "AC baseline initialized while disarmed — pitch=${rawPitch}°, roll=${rawRoll}°")
                 }
                 return
@@ -1185,6 +1204,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                 acCurrentBaselinePitch = rawPitch
                 acCurrentBaselineRoll = rawRoll
                 acBaselineInitialized = true
+                acPrevSmoothedPitch = rawPitch
+                acPrevSmoothedRoll = rawRoll
+                acLastSampleMs = System.currentTimeMillis()
+                acSettleStartMs = 0L
                 Log.d(TAG, "AC baseline initialized — pitch=${rawPitch}°, roll=${rawRoll}°")
                 return
             }
@@ -1192,69 +1215,101 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             acSmoothedPitch += AC_LPF_ALPHA * (rawPitch - acSmoothedPitch)
             acSmoothedRoll += AC_LPF_ALPHA * (rawRoll - acSmoothedRoll)
 
-            val absPitch = Math.abs(acSmoothedPitch)
-            if (absPitch < AC_PITCH_MIN || absPitch > AC_PITCH_MAX) {
-                cancelAutoCalibrationTimer()
+            // ── Posture Adaptation v2 ──────────────────────────────────
+            // (Design rationale lives with the AC_* constants above.)
+            // Step 1: angular speed of the SMOOTHED orientation. The LPF
+            // has already removed hand tremor, so a settled grip reads
+            // only a few °/s while a genuine posture change reads 40°/s+.
+            val nowMs = System.currentTimeMillis()
+            val dtSec = if (acLastSampleMs > 0L) {
+                ((nowMs - acLastSampleMs) / 1000f).coerceIn(0.01f, 1f)
+            } else {
+                0.05f
+            }
+            val stepDeg = Math.hypot(
+                normalizeAngle(acSmoothedPitch - acPrevSmoothedPitch).toDouble(),
+                normalizeAngle(acSmoothedRoll - acPrevSmoothedRoll).toDouble()
+            ).toFloat()
+            val angularSpeed = stepDeg / dtSec
+            acPrevSmoothedPitch = acSmoothedPitch
+            acPrevSmoothedRoll = acSmoothedRoll
+            acLastSampleMs = nowMs
+
+            // Step 2: physical-validity gate. This REPLACES the old
+            // |pitch| 10°-170° dead zone, which froze adaptation in
+            // exactly the lying-down postures that need it (|pitch|
+            // leaves that band when the phone is held overhead). The
+            // gravity vector of a held device has |g| ≈ 9.8 m/s² at ANY
+            // posture; near-0 means free-fall or a sensor glitch.
+            val gMag = Math.sqrt((gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
+            if (gMag < AC_GRAVITY_MIN || gMag > AC_GRAVITY_MAX) {
+                acSettleStartMs = 0L
                 return
             }
 
-            // ── BƯỚC 2.1: FIX Timer Measurement — Use targetAlpha for INSTANT classification ──
-            // PROBLEM: currentDisplayedAlpha is delayed by lerp, causing wrong timer duration.
-            // SOLUTION: Use targetAlpha which reflects INSTANT sensor state (no lerp delay).
-            // Alpha scale: 0-255. Classification logic:
-            //   • targetAlpha <= 0 (transparent, no overlay) → reset timer and skip
-            //   • targetAlpha 1-102 (thin overlay, up to 40%) → 1.5s needed
-            //   • targetAlpha > 102 (thick overlay, over 40%) → 5s needed
-            val alphaSnapshot = targetAlpha
-            val opacityRatio = (alphaSnapshot / MAX_ALPHA).coerceIn(0f, 1f)
-            val opacityBucket = when {
-                opacityRatio < AC_MIN_OPACITY_RATIO -> 0
-                opacityRatio < AC_FAST_OPACITY_RATIO -> 1
-                else -> 2
-            }
-            if (opacityBucket == 0) {
-                // Transparent state (no overlay) — reset timer and skip
-                firstDeviationTime = 0L
-                acTargetDuration = 0L
-                acStableOpacityBucket = -1
+            // Step 3: deviation from the current AC baseline. Only
+            // deviations the shield itself would act on (user tolerance
+            // + margin) can become posture candidates.
+            val deviation = Math.hypot(
+                normalizeAngle(acSmoothedPitch - acCurrentBaselinePitch).toDouble(),
+                normalizeAngle(acSmoothedRoll - acCurrentBaselineRoll).toDouble()
+            ).toFloat()
+            val postureThreshold = maxOf(sensorTolerance + AC_POSTURE_MARGIN_DEG, AC_POSTURE_MIN_DEG)
+            if (deviation <= postureThreshold) {
+                if (acSettleStartMs != 0L) {
+                    Log.d(TAG, "AC posture candidate dropped - back within threshold (dev=${deviation})")
+                    acSettleStartMs = 0L
+                }
                 return
             }
-            val targetDuration: Long = if (opacityBucket == 1) {
-                AC_FAST_STABILITY_DURATION
-            } else {
-                AC_STABILITY_DURATION
+
+            // Step 4: still moving -> not a posture yet. The settle
+            // window (re)opens at the arrival orientation; natural sway
+            // AFTER arrival stays under the speed threshold, so - unlike
+            // the old frozen-snapshot timer - it no longer restarts the
+            // wait from zero.
+            if (angularSpeed > AC_SETTLE_SPEED_DEG_S) {
+                acSettleStartMs = 0L
+                acCandidateStartPitch = acSmoothedPitch
+                acCandidateStartRoll = acSmoothedRoll
+                return
             }
 
-            // ── ANGLE DEVIATION CHECK (only runs if opacity > ~2%) ──
-            val pitchDelta = Math.abs(normalizeAngle(acSmoothedPitch - acCurrentBaselinePitch))
-            val rollDelta = Math.abs(normalizeAngle(acSmoothedRoll - acCurrentBaselineRoll))
-            val totalDelta = Math.hypot(pitchDelta.toDouble(), rollDelta.toDouble()).toFloat()
-            // Only proceed if deviation exceeds threshold (40° for major posture changes)
-            if (alphaSnapshot > 0f) {
-                // Begin timestamp detection (VSYNC will check for completion)
-                val pitchSnapshotDrift = Math.abs(normalizeAngle(acSmoothedPitch - acStableTargetPitch))
-                val rollSnapshotDrift = Math.abs(normalizeAngle(acSmoothedRoll - acStableTargetRoll))
-                val bucketChanged = acStableOpacityBucket != opacityBucket || acTargetDuration != targetDuration
-                val angleDrifted = pitchSnapshotDrift > AC_SNAPSHOT_ANGLE_TOLERANCE || rollSnapshotDrift > AC_SNAPSHOT_ANGLE_TOLERANCE
-                if (firstDeviationTime == 0L || bucketChanged || angleDrifted) {
-                    firstDeviationTime = System.currentTimeMillis()
-                    acTargetDuration = targetDuration
-                    acStableTargetPitch = acSmoothedPitch
-                    acStableTargetRoll = acSmoothedRoll
-                    acStableOpacityBucket = opacityBucket
-                    ensureVsyncRunning()
-                    Log.d(TAG, "AC timer STARTED — opacity=${alphaSnapshot.toInt()}, targetDuration=${targetDuration}ms, deviation=${totalDelta}°")
-                }
-                // ── BƯỚC 2.2: Timer check REMOVED from sensor callback ──
-                // The VSYNC loop now handles checking if timer expired (60fps accuracy).
-                // Sensor callback only STARTS the timer when angle deviates.
-            } else {
-                // Reset timer when angle returns within tolerance (< 40° deviation)
-                if (firstDeviationTime != 0L) {
-                    Log.d(TAG, "AC timer RESET — angle returned to tolerance (delta=${totalDelta}°)")
-                }
-                firstDeviationTime = 0L
-                acTargetDuration = 0L
+            // Step 5: settled in a deviated orientation - open the settle
+            // window, or keep the candidate glued to the live smoothed
+            // angles while it runs.
+            if (acSettleStartMs == 0L) {
+                acSettleStartMs = nowMs
+                acCandidateStartPitch = acSmoothedPitch
+                acCandidateStartRoll = acSmoothedRoll
+                Log.d(TAG, "AC posture settle STARTED - dev=${deviation}, speed=${angularSpeed}/s")
+                return
+            }
+            acStableTargetPitch = acSmoothedPitch
+            acStableTargetRoll = acSmoothedRoll
+
+            // Guard: the candidate must not have wandered since the
+            // window opened - a slow continuous drift is not a held
+            // posture, so restart the window at the current orientation.
+            val candidateDrift = Math.hypot(
+                normalizeAngle(acSmoothedPitch - acCandidateStartPitch).toDouble(),
+                normalizeAngle(acSmoothedRoll - acCandidateStartRoll).toDouble()
+            ).toFloat()
+            if (candidateDrift > AC_CANDIDATE_DRIFT_DEG) {
+                acSettleStartMs = nowMs
+                acCandidateStartPitch = acSmoothedPitch
+                acCandidateStartRoll = acSmoothedRoll
+                return
+            }
+
+            // Step 6: held still long enough -> this IS the user's new
+            // posture (sitting -> lying, etc.). Adopt it as the baseline;
+            // the transition fades the shield out and asks the main
+            // engine to re-capture its own baseline on the next frame.
+            if (nowMs - acSettleStartMs >= AC_SETTLE_DURATION_MS) {
+                Log.d(TAG, "AC posture ADAPTED - new baseline pitch=${acStableTargetPitch}, roll=${acStableTargetRoll} (dev was ${deviation})")
+                acSettleStartMs = 0L
+                performSmoothBaselineTransition(acStableTargetPitch, acStableTargetRoll)
             }
         }
 
@@ -1286,8 +1341,9 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         acCurrentBaselinePitch = newPitch
         acCurrentBaselineRoll = newRoll
 
-        // Step 2: Reset deviation timer
+        // Step 2: Reset deviation timer + settle window
         firstDeviationTime = 0L
+        acSettleStartMs = 0L
 
         // Step 3: Cancel any previous fade animator to avoid conflicts
         fadeAnimator?.cancel()
