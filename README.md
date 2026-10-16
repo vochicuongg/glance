@@ -15,7 +15,7 @@
 
 ## 🌟 Giới Thiệu Chung
 
-Trong kỷ nguyên số, thông tin hiển thị trên màn hình điện thoại luôn đối mặt với nguy cơ bị nhìn trộm ở quán cà phê, xe buýt, sân bay hoặc thậm chí là tại văn phòng. **Glance** giải quyết triệt để vấn đề này bằng cách tận dụng cảm biến con quay hồi chuyển (gyroscope) tích hợp để tự động phủ một lớp rèm bảo mật màu đen tuyệt đối lên màn hình ngay khi thiết bị bị nghiêng ra ngoài góc nhìn cá nhân an toàn của bạn.
+Trong kỷ nguyên số, thông tin hiển thị trên màn hình điện thoại luôn đối mặt với nguy cơ bị nhìn trộm ở quán cà phê, xe buýt, sân bay hoặc thậm chí là tại văn phòng. **Glance** giảm nguy cơ này bằng cách dùng cảm biến vector xoay hợp nhất (game rotation vector — kết hợp gyroscope, gia tốc kế) để tự động phủ một lớp rèm bảo mật lên màn hình ngay khi thiết bị nghiêng ra ngoài góc nhìn cá nhân an toàn của bạn. Từ phiên bản 2.0, Glance bổ sung bộ tính năng mô phỏng **Privacy Display** của Samsung (xem mục riêng bên dưới).
 
 Với ngôn ngữ thiết kế **"Platinum & Gold"** đẳng cấp, Glance mang lại trải nghiệm tinh tế, chuyên nghiệp tương tự như giao diện của các ứng dụng ngân hàng tư nhân (Private Banking) cao cấp nhất.
 
@@ -49,7 +49,7 @@ Với ngôn ngữ thiết kế **"Platinum & Gold"** đẳng cấp, Glance mang 
 ## ✨ Các Tính Năng Nổi Bật
 
 ### 1. Lá Chắn Góc Nghiêng Thông Minh (Sensor-Driven Overlay)
-* Tự động đo lường độ lệch góc nhìn theo hai trục **Pitch (Trước/Sau)** và **Roll (Trái/Phải)** qua luồng dữ liệu thời gian thực (tần số 10Hz tiết kiệm pin).
+* Tự động đo lường độ lệch góc nhìn theo hai trục **Pitch (Trước/Sau)** và **Roll (Trái/Phải)**. Cảm biến đăng ký ở `SENSOR_DELAY_GAME`; riêng luồng dữ liệu gửi về giao diện Flutter được giới hạn ~10Hz (100ms) để giảm tải UI.
 * Kích hoạt lớp phủ che mờ màn hình ngay khi thiết bị lệch khỏi vùng an toàn.
 
 ### 2. Thuật Toán Trễ Chống Nhấp Nháy (Hysteresis Flicker Guard)
@@ -62,7 +62,7 @@ Với ngôn ngữ thiết kế **"Platinum & Gold"** đẳng cấp, Glance mang 
 
 ### 4. Hai Cấp Độ Bảo Mật Tùy Chọn (Protection Levels)
 * **Chế Độ Tiêu Chuẩn (Standard Mode):** Sử dụng quyền vẽ đè hệ thống (`SYSTEM_ALERT_WINDOW`), tương thích hoàn hảo và chạy mượt mà trên tất cả ứng dụng, bao gồm cả các ứng dụng tài chính/ngân hàng khó tính.
-* **Chế Độ Tối Đa (Maximum Mode):** Sử dụng quyền Trợ năng (`AccessibilityService`) kết hợp cử chỉ thông minh. Đảm bảo bảo mật cấp độ cao nhất trước các hành vi chụp ảnh màn hình hoặc ghi đè độc hại, tuy nhiên một số ứng dụng ngân hàng có tính năng chống Accessibility có thể từ chối khởi chạy khi bật chế độ này.
+* **Chế Độ Tối Đa (Maximum Mode):** Sử dụng quyền Trợ năng (`AccessibilityService`) với cửa sổ phủ đáng tin cậy (`TYPE_ACCESSIBILITY_OVERLAY`, 2 lớp × alpha 197, tương đương ~242/95% sau khi cộng dồn — xem `ShieldConfig.kt`). Lớp phủ đậm hơn chế độ Tiêu chuẩn (alpha 204/80%, trần an toàn cho cảm ứng xuyên qua trên Android 12+). Lưu ý: lớp phủ **không** ngăn được chụp ảnh màn hình, và một số ứng dụng ngân hàng có thể từ chối khởi chạy khi Trợ năng đang bật.
 
 ### 5. Hiệu Chỉnh Một Chạm (Instant Calibration)
 * Người dùng chỉ cần cầm máy ở tư thế thoải mái nhất và nhấn **"Hiệu chỉnh ngay"** (Calibrate). Hệ thống sẽ chụp lại góc baseline $(\beta_0, \gamma_0)$ làm điểm chuẩn bảo vệ tức thì.
@@ -71,6 +71,25 @@ Với ngôn ngữ thiết kế **"Platinum & Gold"** đẳng cấp, Glance mang 
 * Tích hợp gạch phím tắt (Tile) trên thanh trạng thái hệ thống Android giúp tắt/bật nhanh dịch vụ Glance mà không cần mở ứng dụng.
 
 ---
+
+## 📱 Glance 2.0 — Bộ tính năng Privacy Display (mô phỏng Samsung)
+
+Samsung Galaxy S26 Ultra có **Privacy Display** phần cứng (Flex Magic Pixel): khi bật, panel chỉ phát ánh sáng theo hướng thẳng, người ngồi cạnh nhìn xiên sẽ thấy màn hình tối đi, trong khi người cầm máy nhìn thẳng vẫn rõ. Tính năng này bật/tắt được, áp dụng theo từng ứng dụng, chỉ cho vùng thông báo, hoặc tự bật khi nhập PIN/mật khẩu.
+
+Glance 2.0 mô phỏng **bộ hành vi** đó bằng phần mềm:
+
+| Hành vi của Samsung | Cách Glance 2.0 thực hiện |
+|---|---|
+| Riêng tư toàn màn hình | Lá chắn theo góc nghiêng (engine sẵn có) |
+| Kích hoạt theo từng ứng dụng | Chọn danh sách ứng dụng được bảo vệ: Trợ năng (Tối đa) hoặc UsageStats (Tiêu chuẩn). Khi ứng dụng đó đang mở, ngưỡng nghiêng siết xuống tối đa 6° |
+| Chỉ che thông báo (Partial Screen Privacy) | NotificationListener nhận biết có thông báo đến (không đọc nội dung) → phủ dải đen vùng thông báo ở đầu màn hình trong vài giây |
+| Tự bật khi nhập PIN/mật khẩu | Trợ năng kiểm tra **duy nhất** thuộc tính `isPassword` của ô đang nhập — không đọc nội dung, không lưu ký tự |
+| Maximum Privacy Protection | 2 lớp phủ trusted, alpha hiệu dụng ~242, kết hợp họa tiết Pixel Pattern |
+| Pixel hẹp/rộng (Flex Magic Pixel) | Lớp phủ **Pixel Pattern**: họa tiết sọc mịn, mật độ tăng theo độ nghiêng, làm giảm khả năng đọc từ góc xiên |
+
+**Giới hạn trung thực:** Không API Android nào cho ứng dụng bên thứ ba điều hướng ánh sáng ở cấp pixel. Glance tái tạo *khi nào và ở đâu* quyền riêng tư kích hoạt, không tái tạo được hiệu ứng quang học: người cầm máy cũng bị lớp phủ làm tối đi phần nào, không trong suốt hoàn toàn như phần cứng của Samsung.
+
+**Minh bạch về Trợ năng (2.0):** Để nhận biết ứng dụng đang mở và ô mật khẩu, dịch vụ Trợ năng của Glance bật khả năng truy xuất cửa sổ (`canRetrieveWindowContent`). Phạm vi sử dụng bị giới hạn trong code ở hai việc: tên package của cửa sổ hiện tại và cờ `isPassword` của ô đang nhập. Nội dung văn bản trên màn hình và ký tự bạn gõ **không** được đọc, ghi log hay lưu trữ.
 
 ## 🛠️ Kiến Trúc Hệ Thống
 
@@ -115,13 +134,12 @@ Glance sở hữu hệ thống giao diện kép tự động điều chỉnh the
 ## 📦 Công Nghệ & Thư Viện Sử Dụng
 
 ### Flutter/Dart Side:
-* `google_fonts`: Sử dụng bộ font chữ hiện đại, cao cấp.
 * `shared_preferences`: Lưu trữ cấu hình ứng dụng, đồng bộ trạng thái.
 * `permission_handler`: Quản lý các quyền hệ thống phức tạp một cách trực quan.
 * `url_launcher`: Hỗ trợ liên kết ngoài.
 
 ### Android Native Side:
-* **Kotlin Coroutines:** Đảm bảo luồng xử lý cảm biến bất đồng bộ mượt mà không gây giật lag UI chính.
+* **Vòng lặp VSYNC + Handler (Kotlin thuần, không dùng Coroutines):** Xử lý cảm biến và nội suy độ mờ chạy theo nhịp khung hình, không chặn UI chính.
 * **SensorManager:** Lắng nghe trực tiếp sự kiện xoay từ cảm biến thiết bị.
 * **Foreground Service:** Đảm bảo hệ thống Android không giải phóng tiến trình của Glance khi ứng dụng chạy ngầm.
 
@@ -132,7 +150,7 @@ Glance sở hữu hệ thống giao diện kép tự động điều chỉnh the
 ### Yêu cầu hệ thống:
 * Flutter SDK: `^3.10.4`
 * Android SDK: API Level 24+ (Android 7.0 trở lên)
-* Thiết bị Android thật (để sử dụng cảm biến gyroscope và hiển thị lớp phủ overlay).
+* Thiết bị Android thật (để sử dụng cảm biến vector xoay và hiển thị lớp phủ overlay).
 
 ### Các bước khởi chạy:
 

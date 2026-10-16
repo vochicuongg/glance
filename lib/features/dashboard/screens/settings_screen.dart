@@ -10,6 +10,7 @@ import '../../../core/theme/theme_provider.dart';
 import '../../permissions/screens/permission_screen.dart';
 import '../widgets/language_selector_card.dart';
 import '../widgets/about_app_sheet.dart';
+import '../../privacy_display/privacy_display_screen.dart';
 
 /// ─────────────────────────────────────────────────────────────────────────────
 /// Settings Screen
@@ -239,6 +240,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
             const SizedBox(height: 16),
 
+            // ── Privacy Display (Glance 2.0) ────────────────────────────
+            _buildPrivacyDisplayCard(context),
+
+            const SizedBox(height: 16),
+
             // ── Theme Toggle ──────────────────────────────────────────────
             _buildThemeCard(context, strings, currentMode, themeProvider),
 
@@ -255,6 +261,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 32),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Entry card to the Privacy Display settings (Glance 2.0).
+  Widget _buildPrivacyDisplayCard(BuildContext context) {
+    final isVi = LocaleProvider.of(context).locale == AppLocale.vi;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: AppColors.cardSurface(context),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border(context), width: 0.5),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        leading: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: AppColors.gold.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(
+            Icons.privacy_tip_rounded,
+            size: 18,
+            color: AppColors.gold,
+          ),
+        ),
+        title: Text(
+          'Privacy Display',
+          style: TextStyle(
+            color: AppColors.textPrimaryC(context),
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          ),
+        ),
+        subtitle: Text(
+          isVi
+              ? 'Theo ứng dụng · Vùng thông báo · PIN/mật khẩu · Họa tiết'
+              : 'Per-app · Notification zone · PIN/password · Pattern',
+          style: TextStyle(
+            color: AppColors.textSecondaryC(context),
+            fontSize: 12,
+          ),
+        ),
+        trailing: Icon(
+          Icons.chevron_right_rounded,
+          color: AppColors.textSecondaryC(context),
+          size: 20,
+        ),
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => const PrivacyDisplayScreen(),
+            ),
+          );
+        },
       ),
     );
   }

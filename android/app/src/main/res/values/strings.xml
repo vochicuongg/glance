@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Glance</string>
-    <string name="accessibility_service_description">Kích hoạt để Glance tạo rèm che bảo mật che giấu thông tin màn hình.</string>
+    <string name="accessibility_service_description">Kích hoạt để Glance tạo rèm che bảo mật che giấu thông tin màn hình. Glance 2.0: dịch vụ cũng nhận biết ứng dụng đang mở và kiểm tra trường đang nhập có phải ô mật khẩu/PIN hay không (chỉ kiểm tra loại trường, không đọc nội dung bạn gõ).</string>
     <string name="tile_label">Glance</string>
     <string name="tile_status_active">Active</string>
     <string name="tile_status_off">Off</string>

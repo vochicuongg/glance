@@ -159,7 +159,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         // 203 ~= 80% opacity on AMOLED (-5% from previous 85%).
         // Slightly lighter to reduce visual heaviness while maintaining
         // strong privacy protection.
-        private const val MAX_ALPHA = 191
+        private const val MAX_ALPHA = ShieldConfig.ALPHA_MAX_PER_LAYER
 
         /**
          * Checks whether this AccessibilityService is currently enabled
@@ -195,6 +195,11 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
 
     // ── Overlay views ─────────────────────────────────────────────────────
     private val overlayViews: MutableList<View> = mutableListOf()
+
+    // ── Notification zone (Partial Screen Privacy) ────────────────────
+    private val notificationZone = NotificationZone(
+        this, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+    )
 
     // ── Sensor configuration ──────────────────────────────────────────────
     private var sensorSensitivity: Float = 0.5f
@@ -562,6 +567,12 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
                     }
                     Log.d(TAG, "Shield RESUMED — autoCalibrate=$autoCalibrate, overlay hidden, isRunning=$isRunning")
                 }
+                ShieldConfig.ACTION_NOTIFICATION_SHIELD -> {
+                    val active = intent.getBooleanExtra(
+                        ShieldConfig.EXTRA_NOTIFICATION_ACTIVE, false
+                    )
+                    if (active) notificationZone.show() else notificationZone.hide()
+                }
                 ACTION_SET_OVERLAY_MODE, ACTION_SET_TARGETED_AREA -> {
                     loadSavedConfig()
                     if (isOverlayShowing) {
@@ -642,6 +653,7 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             addAction(ACTION_SET_TARGETED_AREA)
             addAction(ACTION_SET_TOLERANCE)
             addAction(ACTION_START_SENSOR_ONLY)
+            addAction(ShieldConfig.ACTION_NOTIFICATION_SHIELD)
             addAction(ACTION_REVOKE_ACCESSIBILITY)
         }
         registerReceiver(configReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -716,8 +728,48 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         return START_STICKY
     }
 
+    // ── Privacy Display triggers (Glance 2.0) ──────────────────────────
+    // Window-state events feed the per-app trigger; focus/content events
+    // feed the credential guard. The credential guard inspects ONLY the
+    // isPassword boolean of the focused input node — notification/window
+    // content and typed text are never read, logged or stored.
+    private var lastCredentialCheckMs: Long = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // No-op: we only use AccessibilityService for TYPE_ACCESSIBILITY_OVERLAY
+        if (event == null) return
+        try {
+            when (event.eventType) {
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                    val pkg = event.packageName?.toString()
+                    PrivacyDisplayTriggers.updateForegroundApp(this, pkg)
+                    if (pkg != null && pkg != packageName) {
+                        PrivacyDisplayState.credentialFieldFocused = false
+                    }
+                }
+                AccessibilityEvent.TYPE_VIEW_FOCUSED,
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                    if (!PrivacyDisplayPrefs.read(this).credentialGuard) {
+                        PrivacyDisplayState.credentialFieldFocused = false
+                        return
+                    }
+                    val now = System.currentTimeMillis()
+                    if (now - lastCredentialCheckMs < 300L) return
+                    lastCredentialCheckMs = now
+                    val root = rootInActiveWindow ?: return
+                    val focused = root.findFocus(
+                        android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT
+                    )
+                    PrivacyDisplayState.credentialFieldFocused =
+                        focused?.isPassword == true
+                    @Suppress("DEPRECATION")
+                    focused?.recycle()
+                    @Suppress("DEPRECATION")
+                    root.recycle()
+                }
+            }
+        } catch (_: Exception) {
+            // Trigger detection must never crash the shield engine.
+        }
     }
 
     override fun onInterrupt() {
@@ -834,8 +886,17 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         //   • OUTER threshold (activate shield): tolerance + band/2
         //   • INNER threshold (deactivate shield): tolerance - band/2
         val hysteresisBand = computeHysteresisBand()
-        val outerThreshold = sensorTolerance + hysteresisBand / 2f
-        val innerThreshold = (sensorTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
+        // Privacy Display triggers (per-app / credential guard): while a
+        // protected app is in the foreground or a password field is
+        // focused, tighten tolerance so the shield reacts to much smaller
+        // tilts — Samsung-style auto-arming on sensitive content.
+        val effectiveTolerance = if (PrivacyDisplayState.triggerActive) {
+            minOf(sensorTolerance, ShieldConfig.TRIGGER_TOLERANCE_DEG)
+        } else {
+            sensorTolerance
+        }
+        val outerThreshold = effectiveTolerance + hysteresisBand / 2f
+        val innerThreshold = (effectiveTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
 
         // Update hysteresis state
         if (!isShieldEngaged && maxDeviation > outerThreshold) {
@@ -890,7 +951,12 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         val safeAlpha = alpha.coerceIn(0, MAX_ALPHA)
         val shieldColor = android.graphics.Color.argb(safeAlpha, 0, 0, 0)
         overlayViews.forEach { view ->
-            view.setBackgroundColor(shieldColor)
+            if (view is PatternOverlayView) {
+                // Pixel Pattern rendering: density follows shield intensity.
+                view.setIntensity(safeAlpha.toFloat() / MAX_ALPHA)
+            } else {
+                view.setBackgroundColor(shieldColor)
+            }
         }
     }
 
@@ -916,6 +982,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
         currentDisplayedAlpha = 0f
 
         try {
+            // Pixel Pattern rendering applies to fullscreen mode only.
+            val usePatternOverlay = PrivacyDisplayPrefs.read(this).renderPattern &&
+                overlayMode != "targeted"
+
             val isTargeted = overlayMode == "targeted"
 
             // CRITICAL FIX: Dữ liệu từ Flutter đã là Physical Pixels. TUYỆT ĐỐI KHÔNG nhân thêm density.
@@ -924,7 +994,10 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
             val pxW = if (isTargeted && areaWidth > 0) areaWidth else WindowManager.LayoutParams.MATCH_PARENT
             val pxH = if (isTargeted && areaHeight > 0) areaHeight else WindowManager.LayoutParams.MATCH_PARENT
 
-            for (i in 0 until 2) {
+            // Dual Shield = 2 layers in solid mode. In pattern mode a
+            // single patterned layer is used (two grilles would moiré).
+            val layerCount = if (usePatternOverlay) 1 else 2
+            for (i in 0 until layerCount) {
                 val params = WindowManager.LayoutParams(
                     pxW,
                     pxH,
@@ -953,7 +1026,12 @@ class MaxOverlayService : AccessibilityService(), SensorEventListener {
 
                 }
 
-                val view = View(this).apply {
+                val view: View = if (usePatternOverlay) {
+                    PatternOverlayView(this)
+                } else {
+                    View(this)
+                }
+                view.apply {
                     // FIX: Đảm bảo lớp phủ tàng hình tuyệt đối khi vừa sinh ra,
                     // triệt tiêu hiện tượng flash khi View được addView().
                     // Background alpha = 0 (hoàn toàn trong suốt), View alpha = 1

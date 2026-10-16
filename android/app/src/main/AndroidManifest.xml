@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ════════════════════════════════════════════════════════════════════
          PERMISSIONS
@@ -12,6 +13,11 @@
 
     <!-- Prevent the system from killing our sensor-reading service -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Glance 2.0 per-app trigger in Standard mode (UsageStats polling).
+         Granted by the user in system Usage Access settings. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Required for Standard mode: run as a foreground service when
          Accessibility is not used (no auto-start by the system) -->
@@ -27,6 +33,12 @@
         <intent>
             <action android:name="android.intent.action.SENDTO" />
             <data android:scheme="mailto" />
+        </intent>
+        <!-- Glance 2.0: enumerate launchable apps for the protected-apps
+             picker without QUERY_ALL_PACKAGES. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
         </intent>
     </queries>
 
@@ -64,8 +76,10 @@
         <!-- ════════════════════════════════════════════════════════════════
              MAX OVERLAY SERVICE (Accessibility Service — Maximum Mode)
              Uses TYPE_ACCESSIBILITY_OVERLAY to bypass Android 12+
-             Untrusted Touch Blocker, allowing Alpha 242 (95% opacity)
+             Untrusted Touch Blocker. Dual-layer shield: 197 alpha per
+             layer compounding to an effective ~242 (95% opacity)
              with full touch pass-through via FLAG_NOT_TOUCHABLE.
+             Values live in ShieldConfig.kt — the single source of truth.
              ⚠️ Banking apps may refuse to run while this service is enabled.
              ════════════════════════════════════════════════════════════════ -->
         <service
@@ -83,7 +97,8 @@
 
         <!-- ════════════════════════════════════════════════════════════════
              STANDARD OVERLAY SERVICE (Regular Foreground Service — Standard Mode)
-             Uses TYPE_APPLICATION_OVERLAY with Alpha capped at 204 (80%).
+             Uses TYPE_APPLICATION_OVERLAY with Alpha capped at 204 (80%)
+             per ShieldConfig.kt — the Android 12 untrusted-touch ceiling.
              Only requires SYSTEM_ALERT_WINDOW — no Accessibility needed.
              Banking apps work normally with this service.
              ════════════════════════════════════════════════════════════════ -->
@@ -110,6 +125,21 @@
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- ════════════════════════════════════════════════════════════════
+             NOTIFICATION LISTENER (Glance 2.0 — Notification Zone)
+             Observes ONLY that a notification exists (never its content)
+             so the engines can cover the heads-up notification area.
+             ════════════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".GlanceNotificationListener"
+            android:label="Glance"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
 

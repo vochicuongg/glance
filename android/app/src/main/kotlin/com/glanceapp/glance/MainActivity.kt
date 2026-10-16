@@ -195,6 +195,42 @@ class MainActivity : FlutterActivity() {
                     ))
                     Log.d(TAG, "Settings read from native: opacity=$opacity, tolerance=$tolerance, sensitivity=$sensitivity, isCalibrated=$isCalibrated")
                 }
+                "getLaunchableApps" -> {
+                    result.success(getLaunchableApps())
+                }
+                "hasUsageAccess" -> {
+                    result.success(hasUsageAccess())
+                }
+                "openUsageAccessSettings" -> {
+                    try {
+                        startActivity(
+                            Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        )
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.success(false)
+                    }
+                }
+                "isNotificationAccessEnabled" -> {
+                    val enabled = Settings.Secure.getString(
+                        contentResolver, "enabled_notification_listeners"
+                    ) ?: ""
+                    result.success(enabled.contains(packageName))
+                }
+                "openNotificationAccessSettings" -> {
+                    try {
+                        startActivity(
+                            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        )
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.success(false)
+                    }
+                }
                 "saveSettingsToNative" -> {
                     val opacity = call.argument<Double>("opacity") ?: 1.0
                     val tolerance = call.argument<Double>("tolerance") ?: 5.0
@@ -556,6 +592,51 @@ class MainActivity : FlutterActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
         }
         startActivity(intent)
+    }
+
+    // ── Privacy Display helpers (Glance 2.0) ───────────────────────────
+
+    /**
+     * Lists user-facing launchable apps for the protected-apps picker.
+     * Uses a launcher-intent query, so no QUERY_ALL_PACKAGES permission
+     * is needed; the matching <queries> block lives in the Manifest.
+     */
+    private fun getLaunchableApps(): List<Map<String, String>> {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val pm = packageManager
+        val resolved = pm.queryIntentActivities(intent, 0)
+        val seen = mutableSetOf<String>()
+        val apps = mutableListOf<Map<String, String>>()
+        for (info in resolved) {
+            val pkg = info.activityInfo.packageName
+            if (pkg == packageName) continue
+            if (!seen.add(pkg)) continue
+            val label = try {
+                info.loadLabel(pm).toString()
+            } catch (_: Exception) {
+                pkg
+            }
+            apps.add(mapOf("package" to pkg, "label" to label))
+        }
+        return apps.sortedBy { it["label"]?.lowercase() ?: "" }
+    }
+
+    /** True when the user has granted Glance "Usage access". */
+    private fun hasUsageAccess(): Boolean {
+        return try {
+            val appOps = getSystemService(
+                android.content.Context.APP_OPS_SERVICE
+            ) as android.app.AppOpsManager
+            appOps.checkOpNoThrow(
+                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                android.os.Process.myUid(),
+                packageName
+            ) == android.app.AppOpsManager.MODE_ALLOWED
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun handleQuickSettingsPreferencesIntent(intent: Intent?) {

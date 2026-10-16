@@ -156,10 +156,11 @@ class StandardOverlayService : Service(), SensorEventListener {
         // ── Max Alpha for Standard mode ───────────────────────────────────
         // 250 ~= 98% opacity (+15% from previous 83%), substantially
         // stronger shield while staying below full opaque.
-        private const val MAX_ALPHA = 255
+        private const val MAX_ALPHA = ShieldConfig.ALPHA_STANDARD
     }
 
     // ── System services ───────────────────────────────────────────────────
+    private var foregroundAppWatcher: ForegroundAppWatcher? = null
     private var windowManager: WindowManager? = null
     private var sensorManager: SensorManager? = null
     private var rotationSensor: Sensor? = null
@@ -168,6 +169,11 @@ class StandardOverlayService : Service(), SensorEventListener {
 
     // ── Overlay views ─────────────────────────────────────────────────────
     private val overlayViews: MutableList<View> = mutableListOf()
+
+    // ── Notification zone (Partial Screen Privacy) ────────────────────
+    private val notificationZone = NotificationZone(
+        this, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+    )
 
     // ── Sensor configuration ──────────────────────────────────────────────
     private var sensorSensitivity: Float = 0.5f
@@ -544,6 +550,12 @@ class StandardOverlayService : Service(), SensorEventListener {
                     }
                     Log.d(TAG, "Shield RESUMED — autoCalibrate=$autoCalibrate, overlay hidden, isRunning=$isRunning")
                 }
+                ShieldConfig.ACTION_NOTIFICATION_SHIELD -> {
+                    val active = intent.getBooleanExtra(
+                        ShieldConfig.EXTRA_NOTIFICATION_ACTIVE, false
+                    )
+                    if (active) notificationZone.show() else notificationZone.hide()
+                }
                 ACTION_SET_OVERLAY_MODE, ACTION_SET_TARGETED_AREA -> {
                     loadSavedConfig()
                     if (isOverlayShowing) {
@@ -586,6 +598,14 @@ class StandardOverlayService : Service(), SensorEventListener {
 
         // ── STEP 2: Initialize system services (idempotent) ───────────────
         initSystemServices()
+
+        // Privacy Display per-app trigger (Standard mode): UsageStats
+        // polling watcher. Idempotent; internally gated by prefs and by
+        // the Usage Access permission.
+        if (foregroundAppWatcher == null) {
+            foregroundAppWatcher = ForegroundAppWatcher(this)
+        }
+        foregroundAppWatcher?.start()
 
         // ── STEP 3: Register BroadcastReceiver (idempotent) ───────────────
         registerConfigReceiver()
@@ -725,6 +745,7 @@ class StandardOverlayService : Service(), SensorEventListener {
                 addAction(ACTION_SET_TARGETED_AREA)
                 addAction(ACTION_SET_TOLERANCE)
                 addAction(ACTION_START_SENSOR_ONLY)
+                addAction(ShieldConfig.ACTION_NOTIFICATION_SHIELD)
             }
             registerReceiver(configReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             receiverRegistered = true
@@ -735,6 +756,7 @@ class StandardOverlayService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy — cleaning up")
+        foregroundAppWatcher?.stop()
         isRunning = false
         destroyAutoCalibration()
         if (receiverRegistered) {
@@ -865,8 +887,17 @@ class StandardOverlayService : Service(), SensorEventListener {
         //   • OUTER threshold (activate shield): tolerance + band/2
         //   • INNER threshold (deactivate shield): tolerance - band/2
         val hysteresisBand = computeHysteresisBand()
-        val outerThreshold = sensorTolerance + hysteresisBand / 2f
-        val innerThreshold = (sensorTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
+        // Privacy Display triggers (per-app / credential guard): while a
+        // protected app is in the foreground or a password field is
+        // focused, tighten tolerance so the shield reacts to much smaller
+        // tilts — Samsung-style auto-arming on sensitive content.
+        val effectiveTolerance = if (PrivacyDisplayState.triggerActive) {
+            minOf(sensorTolerance, ShieldConfig.TRIGGER_TOLERANCE_DEG)
+        } else {
+            sensorTolerance
+        }
+        val outerThreshold = effectiveTolerance + hysteresisBand / 2f
+        val innerThreshold = (effectiveTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
 
         // Update hysteresis state
         if (!isShieldEngaged && maxDeviation > outerThreshold) {
@@ -924,7 +955,12 @@ class StandardOverlayService : Service(), SensorEventListener {
         val safeAlpha = alpha.coerceIn(0, MAX_ALPHA)
         val shieldColor = android.graphics.Color.argb(safeAlpha, 0, 0, 0)
         overlayViews.forEach { view ->
-            view.setBackgroundColor(shieldColor)
+            if (view is PatternOverlayView) {
+                // Pixel Pattern rendering: density follows shield intensity.
+                view.setIntensity(safeAlpha.toFloat() / MAX_ALPHA)
+            } else {
+                view.setBackgroundColor(shieldColor)
+            }
         }
     }
 
@@ -951,6 +987,11 @@ class StandardOverlayService : Service(), SensorEventListener {
 
         try {
             loadSavedConfig()
+
+            // Pixel Pattern rendering applies to fullscreen mode only;
+            // targeted areas keep the solid fill.
+            val usePatternOverlay = PrivacyDisplayPrefs.read(this).renderPattern &&
+                overlayMode != "targeted"
 
             val isTargeted = overlayMode == "targeted"
 
@@ -982,7 +1023,12 @@ class StandardOverlayService : Service(), SensorEventListener {
                 }
             }
 
-            val view = View(this).apply {
+            val view: View = if (usePatternOverlay) {
+                PatternOverlayView(this)
+            } else {
+                View(this)
+            }
+            view.apply {
                 setBackgroundColor(android.graphics.Color.argb(0, 0, 0, 0))
                 alpha = 1f
             }

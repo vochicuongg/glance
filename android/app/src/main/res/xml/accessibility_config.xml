@@ -1,14 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Accessibility Service configuration for Glance Privacy Shield.
      TYPE_ACCESSIBILITY_OVERLAY grants trusted-overlay status, bypassing
-     Android 12+ Untrusted Touch Blocker so we can use Alpha 255 (Pitch Black)
-     while keeping FLAG_NOT_TOUCHABLE for full touch pass-through. -->
+     Android 12+ Untrusted Touch Blocker (dual layer: 197/layer, ~242
+     effective — see ShieldConfig.kt) while keeping FLAG_NOT_TOUCHABLE
+     for full touch pass-through.
+     Glance 2.0: window/focus events power the per-app trigger and the
+     credential guard. Content retrieval is enabled ONLY so the guard can
+     check the isPassword boolean of the focused field; window content
+     and typed text are never read, logged or stored. -->
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes=""
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewFocused"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault"
-    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="0"
     android:settingsActivity="com.glanceapp.glance.MainActivity" />
