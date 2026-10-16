@@ -169,4 +169,59 @@ class AboutAppSheet extends StatelessWidget {
     );
   }
 
+  Widget _buildInfoRow(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    bool isHeader = false,
+    VoidCallback? onTap,
+  }) {
+    final child = Row(
+      children: [
+        Icon(
+          icon,
+          size: isHeader ? 20 : 18,
+          color: isHeader ? AppColors.accent(context) : AppColors.textSecondaryC(context),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isHeader ? AppColors.textPrimaryC(context) : AppColors.textSecondaryC(context),
+              fontSize: isHeader ? 15 : 13.5,
+              fontWeight: isHeader ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ),
+        if (!isHeader) ...[
+          const SizedBox(width: 8),
+          Icon(
+            Icons.open_in_new_rounded,
+            size: 14,
+            color: AppColors.textTertiaryC(context),
+          ),
+        ],
+      ],
+    );
+
+    if (onTap != null) {
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+            child: child,
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+      child: child,
+    );
+  }
 }
