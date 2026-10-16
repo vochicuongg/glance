@@ -1,7 +1,7 @@
 name: glance
 description: "Glance — Premium Anti-Shoulder-Surfing Privacy Overlay"
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: ^3.10.4
@@ -31,5 +31,3 @@ flutter:
   assets:
     - assets/glance-logo.png
     - assets/glance-favicon.png
-    - assets/qr_mbbank.jpg
-    - assets/qr_zalopay.jpg

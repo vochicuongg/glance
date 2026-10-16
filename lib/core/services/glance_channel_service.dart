@@ -426,6 +426,69 @@ class GlanceChannelService {
     }
   }
 
+  // ── Privacy Display (Glance 2.0) ─────────────────────────────────────
+
+  /// Lists launchable apps (package + label) for the protected-apps
+  /// picker. Uses a launcher-intent query on the native side, so no
+  /// QUERY_ALL_PACKAGES permission is required.
+  static Future<List<Map<String, String>>> getLaunchableApps() async {
+    try {
+      final result = await _channel.invokeMethod('getLaunchableApps');
+      if (result is List) {
+        return result
+            .whereType<Map>()
+            .map(
+              (m) => {
+                'package': m['package']?.toString() ?? '',
+                'label': m['label']?.toString() ?? '',
+              },
+            )
+            .where((m) => m['package']!.isNotEmpty)
+            .toList();
+      }
+    } catch (e) {
+      debugPrint('getLaunchableApps failed: $e');
+    }
+    return [];
+  }
+
+  /// Standard-mode per-app trigger needs Android Usage Access.
+  static Future<bool> hasUsageAccess() async {
+    try {
+      return await _channel.invokeMethod<bool>('hasUsageAccess') ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  static Future<void> openUsageAccessSettings() async {
+    try {
+      await _channel.invokeMethod('openUsageAccessSettings');
+    } catch (_) {}
+  }
+
+  /// Notification-zone privacy needs Notification Access.
+  static Future<bool> isNotificationAccessEnabled() async {
+    try {
+      return await _channel.invokeMethod<bool>(
+            'isNotificationAccessEnabled',
+          ) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  static Future<void> openNotificationAccessSettings() async {
+    try {
+      await _channel.invokeMethod('openNotificationAccessSettings');
+    } catch (_) {}
+  }
+
   /// Opens Android's App Info screen so users can allow restricted settings.
   static Future<void> openAppDetails() async {
     try {
