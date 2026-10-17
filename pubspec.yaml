@@ -1,7 +1,7 @@
 name: glance
 description: "Glance — Premium Anti-Shoulder-Surfing Privacy Overlay"
 publish_to: 'none'
-version: 2.0.0+2
+version: 2.2.0+4
 
 environment:
   sdk: ^3.10.4
