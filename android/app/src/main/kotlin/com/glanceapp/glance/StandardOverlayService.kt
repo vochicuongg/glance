@@ -217,6 +217,30 @@ class StandardOverlayService : Service(), SensorEventListener {
     // deactivates when it drops below INNER. Band width scales with sensitivity.
     private var isShieldEngaged: Boolean = false   // Hysteresis state flag
 
+    // ── Intent Filter v2.2 ────────────────────────────────────────────────
+    // The hysteresis flag above used to flip on angle alone: ANY crossing
+    // of the outer threshold - including a small grip adjustment - engaged
+    // the shield instantly. The intent filter adds the two signals a plain
+    // angle cannot express:
+    //   * RATE: a deliberate hide/peep motion drives deviation up fast
+    //     (>= INTENT_FAST_RATE_DEG_S) and engages immediately, exactly as
+    //     responsively as before.
+    //   * DWELL: a slow crossing must PERSIST for INTENT_DWELL_MS before
+    //     engaging. Transient grip wobbles that fall back inside the
+    //     threshold within the window never engage at all, and while a
+    //     posture settle is open (user is repositioning the phone) the
+    //     dwell clock stays frozen - repositioning is not peeking.
+    // Release keeps the inner-threshold hysteresis plus a minimum hold so
+    // the shield cannot strobe at the boundary.
+    private var intentPrevDeviation: Float = 0f
+    private var intentPrevSampleMs: Long = 0L
+    private var intentRateEma: Float = 0f
+    private var intentDwellStartMs: Long = 0L
+    private var shieldEngagedAtMs: Long = 0L
+    private val INTENT_FAST_RATE_DEG_S: Float = 55f
+    private val INTENT_DWELL_MS: Long = 380L
+    private val INTENT_MIN_HOLD_MS: Long = 250L
+
     // ── VSYNC-driven interpolation target ─────────────────────────────────
     private var targetAlpha: Float = 0f
     private var isAnimationRunning = false
@@ -268,6 +292,15 @@ class StandardOverlayService : Service(), SensorEventListener {
     private var acSettleStartMs: Long = 0L
     private var acCandidateStartPitch: Float = 0f
     private var acCandidateStartRoll: Float = 0f
+    // Posture memory (v2.2): the last few settled orientations the user
+    // actually holds (sitting / lying / standing ...). Re-entering a
+    // KNOWN posture confirms in AC_SETTLE_KNOWN_MS instead of the full
+    // settle duration, so repeated daily posture switches feel instant.
+    private val acPostureMemory = mutableListOf<FloatArray>()
+    private var acCandidateKnownPosture: Boolean = false
+    private val AC_POSTURE_MEMORY_MAX: Int = 3
+    private val AC_MEMORY_MATCH_DEG: Float = 6f
+    private val AC_SETTLE_KNOWN_MS: Long = 350L
     // Legacy opacity-bucket timer fields (pre-v2). Posture Adaptation v2
     // decides re-baselining inside the AC sensor listener and never
     // starts this timer; the fields remain because the calibrate /
@@ -293,8 +326,8 @@ class StandardOverlayService : Service(), SensorEventListener {
     private val AC_SETTLE_DURATION_MS: Long = 1000L    // Held-still time that confirms a new posture
     private val AC_SETTLE_SPEED_DEG_S: Float = 10f     // Smoothed angular speed under which the grip counts as settled
     private val AC_CANDIDATE_DRIFT_DEG: Float = 7f     // Max wander inside one settle window before it restarts
-    private val AC_POSTURE_MARGIN_DEG: Float = 4f      // Posture threshold = sensorTolerance + margin...
-    private val AC_POSTURE_MIN_DEG: Float = 9f         // ...but never below this
+    private val AC_POSTURE_MARGIN_DEG: Float = 2.5f    // Posture threshold = sensorTolerance + margin (v2.2: lowered so a SETTLED grip just past the shield threshold also counts as a posture, not only big tilts)
+    private val AC_POSTURE_MIN_DEG: Float = 7.5f       // ...but never below this
     private val AC_GRAVITY_MIN: Float = 6.5f           // m/s^2 - plausibility band for |gravity| (~9.8 when held)
     private val AC_GRAVITY_MAX: Float = 13.5f
     private val AC_ANIMATION_DURATION: Long = 600L         // Smooth transition duration (legacy, kept for reference)
@@ -900,10 +933,45 @@ class StandardOverlayService : Service(), SensorEventListener {
         val outerThreshold = effectiveTolerance + hysteresisBand / 2f
         val innerThreshold = (effectiveTolerance - hysteresisBand / 2f).coerceAtLeast(1f)
 
-        // Update hysteresis state
-        if (!isShieldEngaged && maxDeviation > outerThreshold) {
-            isShieldEngaged = true
-        } else if (isShieldEngaged && maxDeviation < innerThreshold) {
+        // Update hysteresis state — through the Intent Filter (v2.2).
+        // Deviation RATE (EMA of the per-sample change) separates a
+        // deliberate fast tilt from a slow grip drift; the DWELL timer
+        // separates a persisted tilt from a transient wobble; an open
+        // posture-settle window freezes the dwell clock.
+        val nowIntentMs = System.currentTimeMillis()
+        val dtIntentSec = if (intentPrevSampleMs > 0L) {
+            ((nowIntentMs - intentPrevSampleMs) / 1000f).coerceIn(0.005f, 0.5f)
+        } else {
+            0.05f
+        }
+        val rawDevRate = (maxDeviation - intentPrevDeviation) / dtIntentSec
+        intentRateEma = intentRateEma * 0.6f + rawDevRate * 0.4f
+        intentPrevDeviation = maxDeviation
+        intentPrevSampleMs = nowIntentMs
+
+        if (!isShieldEngaged) {
+            if (maxDeviation > outerThreshold) {
+                if (intentRateEma >= INTENT_FAST_RATE_DEG_S) {
+                    // Deliberate motion: engage immediately.
+                    isShieldEngaged = true
+                    shieldEngagedAtMs = nowIntentMs
+                    intentDwellStartMs = 0L
+                } else if (acSettleStartMs == 0L) {
+                    // Slow crossing: must persist for the dwell window.
+                    if (intentDwellStartMs == 0L) intentDwellStartMs = nowIntentMs
+                    if (nowIntentMs - intentDwellStartMs >= INTENT_DWELL_MS) {
+                        isShieldEngaged = true
+                        shieldEngagedAtMs = nowIntentMs
+                        intentDwellStartMs = 0L
+                    }
+                }
+                // else: posture settle in progress — dwell stays frozen.
+            } else {
+                intentDwellStartMs = 0L
+            }
+        } else if (maxDeviation < innerThreshold &&
+            nowIntentMs - shieldEngagedAtMs >= INTENT_MIN_HOLD_MS
+        ) {
             isShieldEngaged = false
         }
 
@@ -1204,6 +1272,7 @@ class StandardOverlayService : Service(), SensorEventListener {
                     acCurrentBaselinePitch = rawPitch
                     acCurrentBaselineRoll = rawRoll
                     acBaselineInitialized = true
+                    rememberPosture(rawPitch, rawRoll)
                     acPrevSmoothedPitch = rawPitch
                     acPrevSmoothedRoll = rawRoll
                     acLastSampleMs = System.currentTimeMillis()
@@ -1220,6 +1289,7 @@ class StandardOverlayService : Service(), SensorEventListener {
                 acCurrentBaselinePitch = rawPitch
                 acCurrentBaselineRoll = rawRoll
                 acBaselineInitialized = true
+                rememberPosture(rawPitch, rawRoll)
                 acPrevSmoothedPitch = rawPitch
                 acPrevSmoothedRoll = rawRoll
                 acLastSampleMs = System.currentTimeMillis()
@@ -1299,6 +1369,7 @@ class StandardOverlayService : Service(), SensorEventListener {
                 acSettleStartMs = nowMs
                 acCandidateStartPitch = acSmoothedPitch
                 acCandidateStartRoll = acSmoothedRoll
+                acCandidateKnownPosture = isKnownPosture(acSmoothedPitch, acSmoothedRoll)
                 Log.d(TAG, "AC posture settle STARTED - dev=${deviation}, speed=${angularSpeed}/s")
                 return
             }
@@ -1323,9 +1394,15 @@ class StandardOverlayService : Service(), SensorEventListener {
             // posture (sitting -> lying, etc.). Adopt it as the baseline;
             // the transition fades the shield out and asks the main
             // engine to re-capture its own baseline on the next frame.
-            if (nowMs - acSettleStartMs >= AC_SETTLE_DURATION_MS) {
-                Log.d(TAG, "AC posture ADAPTED - new baseline pitch=${acStableTargetPitch}, roll=${acStableTargetRoll} (dev was ${deviation})")
+            val settleRequiredMs = if (acCandidateKnownPosture) {
+                AC_SETTLE_KNOWN_MS
+            } else {
+                AC_SETTLE_DURATION_MS
+            }
+            if (nowMs - acSettleStartMs >= settleRequiredMs) {
+                Log.d(TAG, "AC posture ADAPTED - new baseline pitch=${acStableTargetPitch}, roll=${acStableTargetRoll} (dev was ${deviation}, known=${acCandidateKnownPosture})")
                 acSettleStartMs = 0L
+                rememberPosture(acStableTargetPitch, acStableTargetRoll)
                 performSmoothBaselineTransition(acStableTargetPitch, acStableTargetRoll)
             }
         }
@@ -1353,6 +1430,30 @@ class StandardOverlayService : Service(), SensorEventListener {
      *    VSYNC loop naturally converge to 0 once the new baseline matches
      *    the current sensor reading (delta ≈ 0 → alpha ≈ 0).
      */
+    // ── Posture memory helpers (v2.2) ─────────────────────────────────
+    private fun rememberPosture(pitch: Float, roll: Float) {
+        val dup = acPostureMemory.indexOfFirst {
+            Math.hypot(
+                normalizeAngle(pitch - it[0]).toDouble(),
+                normalizeAngle(roll - it[1]).toDouble()
+            ) <= AC_MEMORY_MATCH_DEG
+        }
+        if (dup >= 0) acPostureMemory.removeAt(dup)
+        acPostureMemory.add(floatArrayOf(pitch, roll))
+        while (acPostureMemory.size > AC_POSTURE_MEMORY_MAX) {
+            acPostureMemory.removeAt(0)
+        }
+    }
+
+    private fun isKnownPosture(pitch: Float, roll: Float): Boolean {
+        return acPostureMemory.any {
+            Math.hypot(
+                normalizeAngle(pitch - it[0]).toDouble(),
+                normalizeAngle(roll - it[1]).toDouble()
+            ) <= AC_MEMORY_MATCH_DEG
+        }
+    }
+
     private fun performSmoothBaselineTransition(newPitch: Float, newRoll: Float) {
         // Step 1: Update AC's own baseline tracking (gravity-sensor coordinates)
         acCurrentBaselinePitch = newPitch
