@@ -14,8 +14,8 @@ import '../../../core/theme/app_colors.dart';
 ///   opacity = (deviation / maxTolerance)²
 ///
 /// Visual feedback is provided via:
-///   • A gold-accented slider with smooth animation.
-///   • A label showing the current sensitivity level (Low / Medium / High).
+///   • A gold-accented slider with smooth animation (0–100, step 1).
+///   • A numeric badge showing the current sensitivity value (0–100).
 ///   • A subtle description explaining what the setting does.
 /// ─────────────────────────────────────────────────────────────────────────────
 class SensitivitySliderCard extends StatelessWidget {
@@ -38,13 +38,6 @@ class SensitivitySliderCard extends StatelessWidget {
     required this.onChanged,
     required this.onChangeEnd,
   });
-
-  /// Returns a human-friendly label for the current sensitivity level.
-  String _sensitivityLabel(LocalizedStrings s) {
-    if (value <= 0.3) return s.sensitivityLow;
-    if (value <= 0.7) return s.sensitivityMedium;
-    return s.sensitivityHigh;
-  }
 
   /// Returns a description for the current sensitivity level.
   String _sensitivityDescription(LocalizedStrings s) {
@@ -131,7 +124,7 @@ class SensitivitySliderCard extends StatelessWidget {
                   ),
                 ),
                 child: Text(
-                  _sensitivityLabel(strings),
+                  '${(value * 100).round()}',
                   style: textTheme.labelLarge?.copyWith(
                     color: isEnabled
                         ? AppColors.accent(context)
@@ -160,6 +153,7 @@ class SensitivitySliderCard extends StatelessWidget {
               value: value,
               min: 0.0,
               max: 1.0,
+              divisions: 100,
               onChanged: isEnabled ? onChanged : null,
               onChangeEnd: isEnabled ? onChangeEnd : null,
             ),
@@ -172,14 +166,14 @@ class SensitivitySliderCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  strings.relaxed,
+                  '0',
                   style: textTheme.bodySmall?.copyWith(
                     color: AppColors.textTertiaryC(context),
                     fontSize: 11,
                   ),
                 ),
                 Text(
-                  strings.strict,
+                  '100',
                   style: textTheme.bodySmall?.copyWith(
                     color: AppColors.textTertiaryC(context),
                     fontSize: 11,
@@ -196,7 +190,7 @@ class SensitivitySliderCard extends StatelessWidget {
             duration: const Duration(milliseconds: 250),
             child: Text(
               _sensitivityDescription(strings),
-              key: ValueKey(_sensitivityLabel(strings)),
+              key: ValueKey(_sensitivityDescription(strings)),
               style: textTheme.bodySmall?.copyWith(
                 color: AppColors.textTertiaryC(context),
                 height: 1.4,
